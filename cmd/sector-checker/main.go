@@ -25,6 +25,7 @@ import (
 	logging "github.com/ipfs/go-log/v2"
 	"github.com/lingdor/stackerror"
 	"github.com/mitchellh/go-homedir"
+	"github.com/prometheus/common/log"
 	"golang.org/x/xerrors"
 
 	"github.com/filecoin-project/go-state-types/abi"
@@ -35,16 +36,19 @@ import (
 
 	"github.com/filecoin-project/lotus/extern/sector-storage/ffiwrapper/basicfs"
 
-	"github.com/filecoin-project/specs-actors/actors/builtin/miner"
-
 	"github.com/filecoin-project/lotus/build"
 	"github.com/urfave/cli/v2"
 
+	"github.com/filecoin-project/lotus/chain/actors/builtin/miner"
 	"github.com/filecoin-project/lotus/chain/types"
+
+	miner0 "github.com/filecoin-project/specs-actors/actors/builtin/miner"
+	"github.com/filecoin-project/specs-storage/storage"
 )
 
 var c chan os.Signal
-var log = logging.Logger("filecash-check")
+
+//var log = logging.Logger("filecash-check")
 
 type Commit2In struct {
 	SectorNum  int64
@@ -58,10 +62,10 @@ func main_exe() {
 
 	log.Info("Starting filecash sectors check")
 
-	miner.SupportedProofTypes[abi.RegisteredSealProof_StackedDrg2KiBV1] = struct{}{}
+	miner0.SupportedProofTypes[abi.RegisteredSealProof_StackedDrg2KiBV1] = struct{}{}
 
 	app := &cli.App{
-                Name:    "filecash-sector-checker",
+		Name:    "filecash-sector-checker",
 		Usage:   "check sector window post",
 		Version: build.UserVersion(),
 		Commands: []*cli.Command{
@@ -80,7 +84,7 @@ func main_exe() {
 }
 
 var sealBenchCmd = &cli.Command{
-	Name: "checking",
+	Name:  "checking,port.go:89:28: not enough",
 	Usage: "filecash sector checker",
 	Flags: []cli.Flag{
 		&cli.StringFlag{
@@ -187,14 +191,10 @@ var sealBenchCmd = &cli.Command{
 		}
 		sectorSize := abi.SectorSize(sectorSizeInt)
 
-		spt, err := ffiwrapper.SealProofTypeFromSectorSize(sectorSize)
+		spt, err := miner.SealProofTypeFromSectorSize(sectorSize, build.NewestNetworkVersion)
 		if err != nil {
 			stackerror.New(err.Error())
 			return err
-		}
-
-		cfg := &ffiwrapper.Config{
-			SealProofType: spt,
 		}
 
 		if err := paramfetch.GetParams(lcli.ReqContext(c), build.ParametersJSON(), uint64(sectorSize)); err != nil {
@@ -206,13 +206,13 @@ var sealBenchCmd = &cli.Command{
 			Root: sbdir,
 		}
 
-		sb, err := ffiwrapper.New(sbfs, cfg)
+		sb, err := ffiwrapper.New(sbfs)
 		if err != nil {
 			stackerror.New(err.Error())
 			return err
 		}
 
-		sealedSectors := getSectorsInfo(c.String("sectors-file"), sb.SealProofType())
+		sealedSectors := getSectorsInfo(c.String("sectors-file"), spt)
 
 		var challenge [32]byte
 		rand.Read(challenge[:])
@@ -442,24 +442,23 @@ var proveCmd = &cli.Command{
 				fmt.Print("^^^^^^^^^^^^")
 				if cid == int(c2in.SectorNum) {
 					fmt.Print("22222^^^^^^^^^^^^")
-					spt, err := ffiwrapper.SealProofTypeFromSectorSize(abi.SectorSize(c2in.SectorSize))
+					spt, err := miner.SealProofTypeFromSectorSize(abi.SectorSize(c2in.SectorSize), build.NewestNetworkVersion)
 					if err != nil {
 						stackerror.New(err.Error())
 						return err
 					}
 
-					cfg := &ffiwrapper.Config{
-						SealProofType: spt,
-					}
-
-					sb, err := ffiwrapper.New(nil, cfg)
+					sb, err := ffiwrapper.New(nil)
 					if err != nil {
 						stackerror.New(err.Error())
 						return err
 					}
 
 					start := time.Now()
-					proof, err := sb.SealCommit2(context.TODO(), abi.SectorID{Miner: abi.ActorID(mid), Number: abi.SectorNumber(c2in.SectorNum)}, c2in.Phase1Out)
+					//abi.SectorID{Miner: abi.ActorID(mid)
+					sector := storage.SectorRef{ID: abi.SectorID{Miner: abi.ActorID(mid)}, ProofType: spt}
+
+					proof, err := sb.SealCommit2(context.TODO(), sector, c2in.Phase1Out)
 					if err != nil {
 						stackerror.New(err.Error())
 						return err
@@ -480,24 +479,23 @@ var proveCmd = &cli.Command{
 		} else {
 
 			fmt.Print("9999^^^^^^^^^^^^")
-			spt, err := ffiwrapper.SealProofTypeFromSectorSize(abi.SectorSize(c2in.SectorSize))
+			spt, err := miner.SealProofTypeFromSectorSize(abi.SectorSize(c2in.SectorSize), build.NewestNetworkVersion)
 			if err != nil {
 				stackerror.New(err.Error())
 				return err
 			}
 
-			cfg := &ffiwrapper.Config{
-				SealProofType: spt,
-			}
-
-			sb, err := ffiwrapper.New(nil, cfg)
+			sb, err := ffiwrapper.New(nil)
 			if err != nil {
 				stackerror.New(err.Error())
 				return err
 			}
 
 			start := time.Now()
-			proof, err := sb.SealCommit2(context.TODO(), abi.SectorID{Miner: abi.ActorID(mid), Number: abi.SectorNumber(c2in.SectorNum)}, c2in.Phase1Out)
+
+			sector := storage.SectorRef{ID: abi.SectorID{Miner: abi.ActorID(mid)}, ProofType: spt}
+
+			proof, err := sb.SealCommit2(context.TODO(), sector, c2in.Phase1Out)
 			if err != nil {
 				stackerror.New(err.Error())
 				return err

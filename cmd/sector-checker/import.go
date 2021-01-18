@@ -21,12 +21,15 @@ import (
 	"github.com/filecoin-project/lotus/chain/store"
 	"github.com/filecoin-project/lotus/chain/types"
 	"github.com/filecoin-project/lotus/chain/vm"
+	"github.com/filecoin-project/lotus/extern/sector-storage/ffiwrapper"
+	"github.com/prometheus/common/log"
+
+	"github.com/filecoin-project/lotus/journal"
 	"github.com/filecoin-project/lotus/lib/blockstore"
 	_ "github.com/filecoin-project/lotus/lib/sigs/bls"
 	_ "github.com/filecoin-project/lotus/lib/sigs/secp"
 
 	"github.com/filecoin-project/go-state-types/abi"
-	"github.com/filecoin-project/lotus/extern/sector-storage/ffiwrapper"
 
 	"github.com/ipfs/go-datastore"
 	badger "github.com/ipfs/go-ds-badger2"
@@ -84,9 +87,11 @@ var importBenchCmd = &cli.Command{
 		if err != nil {
 			return err
 		}
+		var j journal.Journal
 		bs = cbs
 		ds := datastore.NewMapDatastore()
-		cs := store.NewChainStore(bs, ds, vm.Syscalls(ffiwrapper.ProofVerifier))
+
+		cs := store.NewChainStore(bs, bs, ds, vm.Syscalls(ffiwrapper.ProofVerifier), j)
 		stm := stmgr.NewStateManager(cs)
 
 		prof, err := os.Create("import-bench.prof")
