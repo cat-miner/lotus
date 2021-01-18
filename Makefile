@@ -204,6 +204,12 @@ lotus-wallet:
 .PHONY: lotus-wallet
 BINS+=lotus-wallet
 
+lotus-checker:
+	rm -f sector-checker
+	go build -o sector-checker ./cmd/sector-checker
+.PHONY: sector-checker
+BINS+=sector-checker
+
 testground:
 	go build -tags testground -o /dev/null ./cmd/lotus
 .PHONY: testground
