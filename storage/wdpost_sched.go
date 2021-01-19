@@ -31,16 +31,16 @@ type WindowPoStScheduler struct {
 	partitionSectors uint64
 	ch               *changeHandler
 
-	actor  address.Address
-	worker address.Address
+	actor address.Address
 
 	evtTypes [4]journal.EventType
+	journal  journal.Journal
 
 	// failed abi.ChainEpoch // eps
 	// failLk sync.Mutex
 }
 
-func NewWindowedPoStScheduler(api storageMinerApi, fc config.MinerFeeConfig, sb storage.Prover, ft sectorstorage.FaultTracker, actor address.Address, worker address.Address) (*WindowPoStScheduler, error) {
+func NewWindowedPoStScheduler(api storageMinerApi, fc config.MinerFeeConfig, sb storage.Prover, ft sectorstorage.FaultTracker, j journal.Journal, actor address.Address) (*WindowPoStScheduler, error) {
 	mi, err := api.StateMinerInfo(context.TODO(), actor, types.EmptyTSK)
 	if err != nil {
 		return nil, xerrors.Errorf("getting sector size: %w", err)
@@ -59,14 +59,14 @@ func NewWindowedPoStScheduler(api storageMinerApi, fc config.MinerFeeConfig, sb 
 		proofType:        rt,
 		partitionSectors: mi.WindowPoStPartitionSectors,
 
-		actor:  actor,
-		worker: worker,
+		actor: actor,
 		evtTypes: [...]journal.EventType{
-			evtTypeWdPoStScheduler:  journal.J.RegisterEventType("wdpost", "scheduler"),
-			evtTypeWdPoStProofs:     journal.J.RegisterEventType("wdpost", "proofs_processed"),
-			evtTypeWdPoStRecoveries: journal.J.RegisterEventType("wdpost", "recoveries_processed"),
-			evtTypeWdPoStFaults:     journal.J.RegisterEventType("wdpost", "faults_processed"),
+			evtTypeWdPoStScheduler:  j.RegisterEventType("wdpost", "scheduler"),
+			evtTypeWdPoStProofs:     j.RegisterEventType("wdpost", "proofs_processed"),
+			evtTypeWdPoStRecoveries: j.RegisterEventType("wdpost", "recoveries_processed"),
+			evtTypeWdPoStFaults:     j.RegisterEventType("wdpost", "faults_processed"),
 		},
+		journal: j,
 	}, nil
 }
 
@@ -166,7 +166,7 @@ func (s *WindowPoStScheduler) update(ctx context.Context, revert, apply *types.T
 
 // onAbort is called when generating proofs or submitting proofs is aborted
 func (s *WindowPoStScheduler) onAbort(ts *types.TipSet, deadline *dline.Info) {
-	journal.J.RecordEvent(s.evtTypes[evtTypeWdPoStScheduler], func() interface{} {
+	s.journal.RecordEvent(s.evtTypes[evtTypeWdPoStScheduler], func() interface{} {
 		c := evtCommon{}
 		if ts != nil {
 			c.Deadline = deadline

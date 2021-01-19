@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,10 +10,10 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"golang.org/x/xerrors"
-
 	"github.com/fatih/color"
+	"github.com/google/uuid"
 	"github.com/urfave/cli/v2"
+	"golang.org/x/xerrors"
 
 	"github.com/filecoin-project/lotus/extern/sector-storage/storiface"
 
@@ -60,7 +61,7 @@ var sealingWorkersCmd = &cli.Command{
 		}
 
 		type sortableStat struct {
-			id uint64
+			id uuid.UUID
 			storiface.WorkerStats
 		}
 
@@ -70,7 +71,7 @@ var sealingWorkersCmd = &cli.Command{
 		}
 
 		sort.Slice(st, func(i, j int) bool {
-			return st[i].id < st[j].id
+			return st[i].id.String() < st[j].id.String()
 		})
 
 		for _, stat := range st {
@@ -81,13 +82,19 @@ var sealingWorkersCmd = &cli.Command{
 				gpuUse = ""
 			}
 
-			fmt.Printf("Worker %d, host %s\n", stat.id, color.MagentaString(stat.Info.Hostname))
+			var disabled string
+			if !stat.Enabled {
+				disabled = color.RedString(" (disabled)")
+			}
+
+			fmt.Printf("Worker %s, host %s%s\n", stat.id, color.MagentaString(stat.Info.Hostname), disabled)
 
 			var barCols = uint64(64)
 			cpuBars := int(stat.CpuUse * barCols / stat.Info.Resources.CPUs)
 			cpuBar := strings.Repeat("|", cpuBars) + strings.Repeat(" ", int(barCols)-cpuBars)
 
-			fmt.Printf("\tCPU:  [%s] %d core(s) in use\n", color.GreenString(cpuBar), stat.CpuUse)
+			fmt.Printf("\tCPU:  [%s] %d/%d core(s) in use\n",
+				color.GreenString(cpuBar), stat.CpuUse, stat.Info.Resources.CPUs)
 
 			ramBarsRes := int(stat.Info.Resources.MemReserved * barCols / stat.Info.Resources.MemPhysical)
 			ramBarsUsed := int(stat.MemUsedMin * barCols / stat.Info.Resources.MemPhysical)
@@ -155,7 +162,7 @@ var sealingJobsCmd = &cli.Command{
 
 		type line struct {
 			storiface.WorkerJob
-			wid uint64
+			wid uuid.UUID
 		}
 
 		lines := make([]line, 0)
@@ -174,10 +181,13 @@ var sealingJobsCmd = &cli.Command{
 			if lines[i].RunWait != lines[j].RunWait {
 				return lines[i].RunWait < lines[j].RunWait
 			}
+			if lines[i].Start.Equal(lines[j].Start) {
+				return lines[i].ID.ID.String() < lines[j].ID.ID.String()
+			}
 			return lines[i].Start.Before(lines[j].Start)
 		})
 
-		workerHostnames := map[uint64]string{}
+		workerHostnames := map[uuid.UUID]string{}
 
 		wst, err := nodeApi.WorkerStats(ctx)
 		if err != nil {
@@ -193,10 +203,25 @@ var sealingJobsCmd = &cli.Command{
 
 		for _, l := range lines {
 			state := "running"
-			if l.RunWait != 0 {
+			if l.RunWait > 0 {
 				state = fmt.Sprintf("assigned(%d)", l.RunWait-1)
 			}
-			_, _ = fmt.Fprintf(tw, "%d\t%d\t%d\t%s\t%s\t%s\t%s\n", l.ID, l.Sector.Number, l.wid, workerHostnames[l.wid], l.Task.Short(), state, time.Now().Sub(l.Start).Truncate(time.Millisecond*100))
+			if l.RunWait == -1 {
+				state = "ret-wait"
+			}
+			dur := "n/a"
+			if !l.Start.IsZero() {
+				dur = time.Now().Sub(l.Start).Truncate(time.Millisecond * 100).String()
+			}
+
+			_, _ = fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
+				hex.EncodeToString(l.ID.ID[10:]),
+				l.Sector.Number,
+				hex.EncodeToString(l.wid[5:]),
+				workerHostnames[l.wid],
+				l.Task.Short(),
+				state,
+				dur)
 		}
 
 		return tw.Flush()

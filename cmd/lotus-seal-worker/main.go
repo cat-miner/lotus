@@ -10,19 +10,22 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"github.com/ipfs/go-datastore/namespace"
 	logging "github.com/ipfs/go-log/v2"
 	manet "github.com/multiformats/go-multiaddr/net"
 	"github.com/urfave/cli/v2"
+	"go.opencensus.io/stats/view"
+	"go.opencensus.io/tag"
 	"golang.org/x/xerrors"
 
 	"github.com/filecoin-project/go-jsonrpc"
 	"github.com/filecoin-project/go-jsonrpc/auth"
 	paramfetch "github.com/filecoin-project/go-paramfetch"
+	"github.com/filecoin-project/go-statestore"
 
 	"github.com/filecoin-project/lotus/api"
 	"github.com/filecoin-project/lotus/api/apistruct"
@@ -34,6 +37,8 @@ import (
 	"github.com/filecoin-project/lotus/extern/sector-storage/stores"
 	"github.com/filecoin-project/lotus/lib/lotuslog"
 	"github.com/filecoin-project/lotus/lib/rpcenc"
+	"github.com/filecoin-project/lotus/metrics"
+	"github.com/filecoin-project/lotus/node/modules"
 	"github.com/filecoin-project/lotus/node/repo"
 )
 
@@ -190,15 +195,18 @@ var runCmd = &cli.Command{
 		}
 
 		// Connect to storage-miner
+		ctx := lcli.ReqContext(cctx)
+
 		var nodeApi api.StorageMiner
 		var closer func()
 		var err error
 		for {
-			nodeApi, closer, err = lcli.GetStorageMinerAPI(cctx,
-				jsonrpc.WithNoReconnect(),
-				jsonrpc.WithTimeout(30*time.Second))
+			nodeApi, closer, err = lcli.GetStorageMinerAPI(cctx, lcli.StorageMinerUseHttp)
 			if err == nil {
-				break
+				_, err = nodeApi.Version(ctx)
+				if err == nil {
+					break
+				}
 			}
 			fmt.Printf("\r\x1b[0KConnecting to miner API... (%s)", err)
 			time.Sleep(time.Second)
@@ -206,9 +214,15 @@ var runCmd = &cli.Command{
 		}
 
 		defer closer()
-		ctx := lcli.ReqContext(cctx)
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
+
+		// Register all metric views
+		if err := view.Register(
+			metrics.DefaultViews...,
+		); err != nil {
+			log.Fatalf("Cannot register the view: %v", err)
+		}
 
 		v, err := nodeApi.Version(ctx)
 		if err != nil {
@@ -218,8 +232,6 @@ var runCmd = &cli.Command{
 			return xerrors.Errorf("lotus-miner API version doesn't match: expected: %s", api.Version{APIVersion: build.MinerAPIVersion})
 		}
 		log.Infof("Remote version %s", v)
-
-		watchMinerConn(ctx, cctx, nodeApi)
 
 		// Check params
 
@@ -328,6 +340,15 @@ var runCmd = &cli.Command{
 		if err != nil {
 			return err
 		}
+		defer func() {
+			if err := lr.Close(); err != nil {
+				log.Error("closing repo", err)
+			}
+		}()
+		ds, err := lr.Datastore("/metadata")
+		if err != nil {
+			return err
+		}
 
 		log.Info("Opening local storage; connecting to master")
 		const unspecifiedAddress = "0.0.0.0"
@@ -367,6 +388,8 @@ var runCmd = &cli.Command{
 
 		// Create / expose the worker
 
+		wsts := statestore.New(namespace.Wrap(ds, modules.WorkerCallsPrefix))
+
 		workerApi := &worker{
 			LocalWorker: sectorstorage.NewLocalWorker(sectorstorage.WorkerConfig{
 				SealProof: spt,
@@ -389,7 +412,7 @@ var runCmd = &cli.Command{
 
 		readerHandler, readerServerOpt := rpcenc.ReaderParamDecoder()
 		rpcServer := jsonrpc.NewServer(readerServerOpt)
-		rpcServer.Register("Filecoin", apistruct.PermissionedWorkerAPI(workerApi))
+		rpcServer.Register("Filecoin", apistruct.PermissionedWorkerAPI(metrics.MetricedWorkerAPI(workerApi)))
 
 		mux.Handle("/rpc/v0", rpcServer)
 		mux.Handle("/rpc/streams/v0/push/{uuid}", readerHandler)
@@ -404,6 +427,7 @@ var runCmd = &cli.Command{
 		srv := &http.Server{
 			Handler: ah,
 			BaseContext: func(listener net.Listener) context.Context {
+				ctx, _ := tag.New(context.Background(), tag.Upsert(metrics.APIInterface, "lotus-worker"))
 				return ctx
 			},
 		}
@@ -448,42 +472,74 @@ var runCmd = &cli.Command{
 			}
 		}
 
-		log.Info("Waiting for tasks")
+		minerSession, err := nodeApi.Session(ctx)
+		if err != nil {
+			return xerrors.Errorf("getting miner session: %w", err)
+		}
 
 		go func() {
-			if err := nodeApi.WorkerConnect(ctx, "ws://"+address+"/rpc/v0"); err != nil {
-				log.Errorf("Registering worker failed: %+v", err)
-				cancel()
-				return
+			heartbeats := time.NewTicker(stores.HeartbeatInterval)
+			defer heartbeats.Stop()
+
+			var connected, reconnect bool
+			for {
+				// If we're reconnecting, redeclare storage first
+				if reconnect {
+					log.Info("Redeclaring local storage")
+
+					if err := localStore.Redeclare(ctx); err != nil {
+						log.Errorf("Redeclaring local storage failed: %+v", err)
+
+						select {
+						case <-ctx.Done():
+							return // graceful shutdown
+						case <-heartbeats.C:
+						}
+						continue
+					}
+
+					connected = false
+				}
+
+				log.Info("Making sure no local tasks are running")
+
+				// TODO: we could get rid of this, but that requires tracking resources for restarted tasks correctly
+				workerApi.LocalWorker.WaitQuiet()
+
+				for {
+					curSession, err := nodeApi.Session(ctx)
+					if err != nil {
+						log.Errorf("heartbeat: checking remote session failed: %+v", err)
+					} else {
+						if curSession != minerSession {
+							minerSession = curSession
+							break
+						}
+
+						if !connected {
+							if err := nodeApi.WorkerConnect(ctx, "http://"+address+"/rpc/v0"); err != nil {
+								log.Errorf("Registering worker failed: %+v", err)
+								cancel()
+								return
+							}
+
+							log.Info("Worker registered successfully, waiting for tasks")
+							connected = true
+						}
+					}
+
+					select {
+					case <-ctx.Done():
+						return // graceful shutdown
+					case <-heartbeats.C:
+					}
+				}
+
+				log.Errorf("LOTUS-MINER CONNECTION LOST")
+
+				reconnect = true
 			}
 		}()
-
-		return srv.Serve(nl)
-	},
-}
-
-func watchMinerConn(ctx context.Context, cctx *cli.Context, nodeApi api.StorageMiner) {
-	go func() {
-		closing, err := nodeApi.Closing(ctx)
-		if err != nil {
-			log.Errorf("failed to get remote closing channel: %+v", err)
-		}
-
-		select {
-		case <-closing:
-		case <-ctx.Done():
-		}
-
-		if ctx.Err() != nil {
-			return // graceful shutdown
-		}
-
-		log.Warnf("Connection with miner node lost, restarting")
-
-		exe, err := os.Executable()
-		if err != nil {
-			log.Errorf("getting executable for auto-restart: %+v", err)
-		}
 
 		_ = log.Sync()
 
@@ -513,6 +569,7 @@ func watchMinerConn(ctx context.Context, cctx *cli.Context, nodeApi api.StorageM
 		}, os.Environ()); err != nil {
 			fmt.Println(err)
 		}
+		return srv.Serve(nl)
 	}()
 }
 

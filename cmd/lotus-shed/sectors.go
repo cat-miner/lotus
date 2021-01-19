@@ -4,18 +4,19 @@ import (
 	"fmt"
 	"strconv"
 
+	"golang.org/x/xerrors"
+
 	"github.com/filecoin-project/go-bitfield"
 	"github.com/filecoin-project/go-state-types/abi"
 	"github.com/filecoin-project/go-state-types/big"
+	"github.com/urfave/cli/v2"
+
+	miner2 "github.com/filecoin-project/specs-actors/v2/actors/builtin/miner"
 
 	"github.com/filecoin-project/lotus/chain/actors"
-	"golang.org/x/xerrors"
-
+	"github.com/filecoin-project/lotus/chain/actors/builtin/miner"
 	"github.com/filecoin-project/lotus/chain/types"
 	lcli "github.com/filecoin-project/lotus/cli"
-	"github.com/filecoin-project/specs-actors/actors/builtin"
-	"github.com/filecoin-project/specs-actors/actors/builtin/miner"
-	"github.com/urfave/cli/v2"
 )
 
 var sectorsCmd = &cli.Command{
@@ -51,14 +52,12 @@ var terminateSectorCmd = &cli.Command{
 			return err
 		}
 		defer closer()
-		log.Info("1")
 
 		api, acloser, err := lcli.GetStorageMinerAPI(cctx)
 		if err != nil {
 			return err
 		}
 		defer acloser()
-		log.Info("2")
 
 		ctx := lcli.ReqContext(cctx)
 
@@ -72,7 +71,7 @@ var terminateSectorCmd = &cli.Command{
 			return err
 		}
 
-		terminationDeclarationParams := []miner.TerminationDeclaration{}
+		terminationDeclarationParams := []miner2.TerminationDeclaration{}
 
 		for _, sn := range cctx.Args().Slice() {
 			sectorNum, err := strconv.ParseUint(sn, 10, 64)
@@ -88,7 +87,7 @@ var terminateSectorCmd = &cli.Command{
 				return fmt.Errorf("get state sector partition %s", err)
 			}
 
-			para := miner.TerminationDeclaration{
+			para := miner2.TerminationDeclaration{
 				Deadline:  loca.Deadline,
 				Partition: loca.Partition,
 				Sectors:   sectorbit,
@@ -97,7 +96,7 @@ var terminateSectorCmd = &cli.Command{
 			terminationDeclarationParams = append(terminationDeclarationParams, para)
 		}
 
-		terminateSectorParams := &miner.TerminateSectorsParams{
+		terminateSectorParams := &miner2.TerminateSectorsParams{
 			Terminations: terminationDeclarationParams,
 		}
 
@@ -109,7 +108,7 @@ var terminateSectorCmd = &cli.Command{
 		smsg, err := nodeApi.MpoolPushMessage(ctx, &types.Message{
 			From:   mi.Owner,
 			To:     maddr,
-			Method: builtin.MethodsMiner.TerminateSectors,
+			Method: miner.Methods.TerminateSectors,
 
 			Value:  big.Zero(),
 			Params: sp,

@@ -12,6 +12,7 @@ import (
 
 	"github.com/filecoin-project/lotus/chain/actors/policy"
 	"github.com/filecoin-project/lotus/chain/gen"
+	"github.com/filecoin-project/lotus/chain/stmgr"
 	"github.com/filecoin-project/lotus/chain/store"
 	"github.com/filecoin-project/lotus/chain/types"
 	"github.com/filecoin-project/lotus/lib/blockstore"
@@ -62,7 +63,7 @@ func BenchmarkGetRandomness(b *testing.B) {
 
 	bs := blockstore.NewBlockstore(bds)
 
-	cs := store.NewChainStore(bs, mds, nil)
+	cs := store.NewChainStore(bs, mds, nil, nil)
 
 	b.ResetTimer()
 
@@ -96,7 +97,7 @@ func TestChainExportImport(t *testing.T) {
 	}
 
 	nbs := blockstore.NewTemporary()
-	cs := store.NewChainStore(nbs, datastore.NewMapDatastore(), nil)
+	cs := store.NewChainStore(nbs, datastore.NewMapDatastore(), nil, nil)
 
 	root, err := cs.Import(buf)
 	if err != nil {
@@ -105,5 +106,62 @@ func TestChainExportImport(t *testing.T) {
 
 	if !root.Equals(last) {
 		t.Fatal("imported chain differed from exported chain")
+	}
+}
+
+func TestChainExportImportFull(t *testing.T) {
+	cg, err := gen.NewGenerator()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var last *types.TipSet
+	for i := 0; i < 100; i++ {
+		ts, err := cg.NextTipSet()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		last = ts.TipSet.TipSet()
+	}
+
+	buf := new(bytes.Buffer)
+	if err := cg.ChainStore().Export(context.TODO(), last, last.Height(), false, buf); err != nil {
+		t.Fatal(err)
+	}
+
+	nbs := blockstore.NewTemporary()
+	cs := store.NewChainStore(nbs, datastore.NewMapDatastore(), nil, nil)
+	root, err := cs.Import(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = cs.SetHead(last)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !root.Equals(last) {
+		t.Fatal("imported chain differed from exported chain")
+	}
+
+	sm := stmgr.NewStateManager(cs)
+	for i := 0; i < 100; i++ {
+		ts, err := cs.GetTipsetByHeight(context.TODO(), abi.ChainEpoch(i), nil, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		st, err := sm.ParentState(ts)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// touches a bunch of actors
+		_, err = sm.GetCirculatingSupply(context.TODO(), abi.ChainEpoch(i), st)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }

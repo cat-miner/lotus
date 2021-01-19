@@ -12,6 +12,10 @@ import (
 type FIL BigInt
 
 func (f FIL) String() string {
+	return f.Unitless() + " FIL"
+}
+
+func (f FIL) Unitless() string {
 	r := new(big.Rat).SetFrac(f.Int, big.NewInt(int64(build.FilecoinPrecision)))
 	if r.Sign() == 0 {
 		return "0 FIC"
@@ -77,6 +81,15 @@ func ParseFIL(s string) (FIL, error) {
 	}
 
 	return FIL{r.Num()}, nil
+}
+
+func MustParseFIL(s string) FIL {
+	n, err := ParseFIL(s)
+	if err != nil {
+		panic(err)
+	}
+
+	return n
 }
 
 var _ encoding.TextMarshaler = (*FIL)(nil)

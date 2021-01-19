@@ -2,7 +2,6 @@ package sectorstorage
 
 import (
 	"context"
-	"fmt"
 	"math/rand"
 	"sort"
 	"sync"
@@ -66,10 +65,14 @@ type scheduler struct {
 
 	schedule       chan *workerRequest
 	windowRequests chan *schedWindowRequest
+	workerChange   chan struct{} // worker added / changed/freed resources
+	workerDisable  chan workerDisableReq
 
 	// owned by the sh.runSched goroutine
 	schedQueue  *requestQueue
 	openWindows []*schedWindowRequest
+
+	workTracker *workTracker
 
 	info chan func(interface{})
 
@@ -84,7 +87,7 @@ type sectorGroup struct {
 }
 
 type workerHandle struct {
-	w Worker
+	workerRpc Worker
 
 	info storiface.WorkerInfo
 
@@ -96,8 +99,7 @@ type workerHandle struct {
 	wndLk         sync.Mutex
 	activeWindows []*schedWindow
 
-	// stats / tracking
-	wt *workTracker
+	enabled bool
 
 	// for sync manager goroutine closing
 	cleanupStarted bool
@@ -114,6 +116,12 @@ type schedWindowRequest struct {
 type schedWindow struct {
 	allocated activeResources
 	todo      []*workerRequest
+}
+
+type workerDisableReq struct {
+	activeWindows []*schedWindow
+	wid           WorkerID
+	done          func()
 }
 
 type activeResources struct {
@@ -152,7 +160,7 @@ func newScheduler(spt abi.RegisteredSealProof) *scheduler {
 		spt: spt,
 
 		nextWorker: 0,
-		workers:    map[WorkerID]*workerHandle{},
+		workers: map[WorkerID]*workerHandle{},
 
 		newWorkers: make(chan *workerHandle),
 
@@ -165,8 +173,15 @@ func newScheduler(spt abi.RegisteredSealProof) *scheduler {
 
 		schedule:       make(chan *workerRequest),
 		windowRequests: make(chan *schedWindowRequest, 20),
+		workerChange:   make(chan struct{}, 20),
+		workerDisable:  make(chan workerDisableReq),
 
 		schedQueue: &requestQueue{},
+
+		workTracker: &workTracker{
+			done:    map[storiface.CallID]struct{}{},
+			running: map[storiface.CallID]trackedWork{},
+		},
 
 		info: make(chan func(interface{})),
 
@@ -231,21 +246,19 @@ type SchedDiagInfo struct {
 func (sh *scheduler) runSched() {
 	defer close(sh.closed)
 
-	go sh.runWorkerWatcher()
-
 	iw := time.After(InitWait)
 	var initialised bool
 
 	for {
 		var doSched bool
+		var toDisable []workerDisableReq
 
 		select {
-		case w := <-sh.newWorkers:
-			sh.newWorker(w)
-
-		case wid := <-sh.workerClosing:
-			sh.dropWorker(wid)
-
+		case <-sh.workerChange:
+			doSched = true
+		case dreq := <-sh.workerDisable:
+			toDisable = append(toDisable, dreq)
+			doSched = true
 		case req := <-sh.schedule:
 			sh.schedQueue.Push(req)
 			doSched = true
@@ -274,6 +287,9 @@ func (sh *scheduler) runSched() {
 		loop:
 			for {
 				select {
+				case <-sh.workerChange:
+				case dreq := <-sh.workerDisable:
+					toDisable = append(toDisable, dreq)
 				case req := <-sh.schedule:
 					sh.schedQueue.Push(req)
 					if sh.testSync != nil {
@@ -284,6 +300,28 @@ func (sh *scheduler) runSched() {
 				default:
 					break loop
 				}
+			}
+
+			for _, req := range toDisable {
+				for _, window := range req.activeWindows {
+					for _, request := range window.todo {
+						sh.schedQueue.Push(request)
+					}
+				}
+
+				openWindows := make([]*schedWindowRequest, 0, len(sh.openWindows))
+				for _, window := range sh.openWindows {
+					if window.worker != req.wid {
+						openWindows = append(openWindows, window)
+					}
+				}
+				sh.openWindows = openWindows
+
+				sh.workersLk.Lock()
+				sh.workers[req.wid].enabled = false
+				sh.workersLk.Unlock()
+
+				req.done()
 			}
 
 			sh.trySched()
@@ -304,6 +342,9 @@ func (sh *scheduler) diag() SchedDiagInfo {
 			Priority: task.priority,
 		})
 	}
+
+	sh.workersLk.RLock()
+	defer sh.workersLk.RUnlock()
 
 	for _, window := range sh.openWindows {
 		out.OpenWindows = append(out.OpenWindows, window.worker)
@@ -329,13 +370,14 @@ func (sh *scheduler) trySched() {
 
 	*/
 
+	sh.workersLk.RLock()
+	defer sh.workersLk.RUnlock()
+
 	windows := make([]schedWindow, len(sh.openWindows))
 	acceptableWindows := make([][]int, sh.schedQueue.Len())
 
 	log.Debugf("SCHED %d queued; %d open windows", sh.schedQueue.Len(), len(windows))
 
-	sh.workersLk.RLock()
-	defer sh.workersLk.RUnlock()
 	if len(sh.openWindows) == 0 {
 		// nothing to schedule on
 		return
@@ -367,7 +409,7 @@ func (sh *scheduler) trySched() {
 			for wnd, windowRequest := range sh.openWindows {
 				worker, ok := sh.workers[windowRequest.worker]
 				if !ok {
-					log.Errorf("worker referenced by windowRequest not found (worker: %d)", windowRequest.worker)
+					log.Errorf("worker referenced by windowRequest not found (worker: %s)", windowRequest.worker)
 					// TODO: How to move forward here?
 					continue
 				}

@@ -33,10 +33,14 @@ const AmplifierHeight = 172870
 
 var UpgradeActorsV2Height = abi.ChainEpoch(10_000_001)
 
+const UpgradeTapeHeight = 140760
+
 // This signals our tentative epoch for mainnet launch. Can make it later, but not earlier.
 // Miners, clients, developers, custodians all need time to prepare.
 // We still have upgrades and state changes to do, but can happen after signaling timing here.
 const UpgradeLiftoffHeight = 10_000_002
+
+const UpgradeKumquatHeight = 170000
 
 func init() {
 	miner0.UpgradeRcHeight = UpgradeBreezeHeight + RcPos
@@ -58,6 +62,6 @@ func init() {
 	Devnet = false
 }
 
-const BlockDelaySecs = uint64(builtin0.EpochDurationSeconds)
+const BlockDelaySecs = uint64(builtin2.EpochDurationSeconds)
 
 const PropagationDelaySecs = uint64(6)

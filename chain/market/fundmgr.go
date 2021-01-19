@@ -4,15 +4,13 @@ import (
 	"context"
 	"sync"
 
+	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/go-state-types/abi"
 	"github.com/filecoin-project/go-state-types/big"
-	"go.uber.org/fx"
-
-	"github.com/filecoin-project/specs-actors/actors/builtin"
 	"github.com/ipfs/go-cid"
 	logging "github.com/ipfs/go-log"
+	"go.uber.org/fx"
 
-	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/lotus/api"
 	"github.com/filecoin-project/lotus/chain/actors"
 	"github.com/filecoin-project/lotus/chain/actors/builtin/market"
@@ -120,9 +118,10 @@ func (fm *FundMgr) EnsureAvailable(ctx context.Context, addr, wallet address.Add
 		return cid.Undef, err
 	}
 	fm.lk.Lock()
+	defer fm.lk.Unlock()
+
 	bal, err := fm.api.StateMarketBalance(ctx, addr, types.EmptyTSK)
 	if err != nil {
-		fm.lk.Unlock()
 		return cid.Undef, err
 	}
 
@@ -138,7 +137,6 @@ func (fm *FundMgr) EnsureAvailable(ctx context.Context, addr, wallet address.Add
 		toAdd = types.NewInt(0)
 	}
 	fm.available[idAddr] = big.Add(avail, toAdd)
-	fm.lk.Unlock()
 
 	log.Infof("Funds operation w/ Expected Balance: %s, In State: %s, Requested: %s, Adding: %s", avail.String(), stateAvail.String(), amt.String(), toAdd.String())
 
@@ -148,6 +146,7 @@ func (fm *FundMgr) EnsureAvailable(ctx context.Context, addr, wallet address.Add
 
 	params, err := actors.SerializeParams(&addr)
 	if err != nil {
+		fm.available[idAddr] = avail
 		return cid.Undef, err
 	}
 
@@ -155,10 +154,11 @@ func (fm *FundMgr) EnsureAvailable(ctx context.Context, addr, wallet address.Add
 		To:     market.Address,
 		From:   wallet,
 		Value:  toAdd,
-		Method: builtin.MethodsMarket.AddBalance,
+		Method: market.Methods.AddBalance,
 		Params: params,
 	}, nil)
 	if err != nil {
+		fm.available[idAddr] = avail
 		return cid.Undef, err
 	}
 

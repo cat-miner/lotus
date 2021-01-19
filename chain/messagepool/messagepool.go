@@ -59,6 +59,8 @@ var MaxUntrustedActorPendingMessages = 10
 
 var MaxNonceGap = uint64(4)
 
+var DefaultMaxFee = abi.TokenAmount(types.MustParseFIL("0.007"))
+
 var (
 	ErrMessageTooBig = errors.New("message too big")
 
@@ -159,6 +161,7 @@ type MessagePool struct {
 	sigValCache *lru.TwoQueueCache
 
 	evtTypes [3]journal.EventType
+	journal  journal.Journal
 }
 
 type msgSet struct {
@@ -182,7 +185,7 @@ func ComputeMinRBF(curPrem abi.TokenAmount) abi.TokenAmount {
 
 func CapGasFee(msg *types.Message, maxFee abi.TokenAmount) {
 	if maxFee.Equals(big.Zero()) {
-		maxFee = types.NewInt(build.FilecoinPrecision / 10)
+		maxFee = DefaultMaxFee
 	}
 
 	gl := types.NewInt(uint64(msg.GasLimit))
@@ -316,13 +319,17 @@ func (ms *msgSet) getRequiredFunds(nonce uint64) types.BigInt {
 	return types.BigInt{Int: requiredFunds}
 }
 
-func New(api Provider, ds dtypes.MetadataDS, netName dtypes.NetworkName) (*MessagePool, error) {
+func New(api Provider, ds dtypes.MetadataDS, netName dtypes.NetworkName, j journal.Journal) (*MessagePool, error) {
 	cache, _ := lru.New2Q(build.BlsSignatureCacheSize)
 	verifcache, _ := lru.New2Q(build.VerifSigCacheSize)
 
 	cfg, err := loadConfig(ds)
 	if err != nil {
 		return nil, xerrors.Errorf("error loading mpool config: %w", err)
+	}
+
+	if j == nil {
+		j = journal.NilJournal()
 	}
 
 	mp := &MessagePool{
@@ -344,10 +351,11 @@ func New(api Provider, ds dtypes.MetadataDS, netName dtypes.NetworkName) (*Messa
 		netName:       netName,
 		cfg:           cfg,
 		evtTypes: [...]journal.EventType{
-			evtTypeMpoolAdd:    journal.J.RegisterEventType("mpool", "add"),
-			evtTypeMpoolRemove: journal.J.RegisterEventType("mpool", "remove"),
-			evtTypeMpoolRepub:  journal.J.RegisterEventType("mpool", "repub"),
+			evtTypeMpoolAdd:    j.RegisterEventType("mpool", "add"),
+			evtTypeMpoolRemove: j.RegisterEventType("mpool", "remove"),
+			evtTypeMpoolRepub:  j.RegisterEventType("mpool", "repub"),
 		},
+		journal: j,
 	}
 
 	// enable initial prunes
@@ -362,11 +370,23 @@ func New(api Provider, ds dtypes.MetadataDS, netName dtypes.NetworkName) (*Messa
 		return err
 	})
 
-	if err := mp.loadLocal(); err != nil {
-		log.Errorf("loading local messages: %+v", err)
-	}
+	mp.curTsLk.Lock()
+	mp.lk.Lock()
 
-	go mp.runLoop()
+	go func() {
+		err := mp.loadLocal()
+
+		mp.lk.Unlock()
+		mp.curTsLk.Unlock()
+
+		if err != nil {
+			log.Errorf("loading local messages: %+v", err)
+		}
+
+		log.Info("mpool ready")
+
+		mp.runLoop()
+	}()
 
 	return mp, nil
 }
@@ -412,8 +432,13 @@ func (mp *MessagePool) runLoop() {
 	}
 }
 
-func (mp *MessagePool) addLocal(m *types.SignedMessage, msgb []byte) error {
+func (mp *MessagePool) addLocal(m *types.SignedMessage) error {
 	mp.localAddrs[m.Message.From] = struct{}{}
+
+	msgb, err := m.Serialize()
+	if err != nil {
+		return xerrors.Errorf("error serializing message: %w", err)
+	}
 
 	if err := mp.localMsgs.Put(datastore.NewKey(string(m.Cid().Bytes())), msgb); err != nil {
 		return xerrors.Errorf("persisting local message: %w", err)
@@ -487,11 +512,6 @@ func (mp *MessagePool) Push(m *types.SignedMessage) (cid.Cid, error) {
 		<-mp.addSema
 	}()
 
-	msgb, err := m.Serialize()
-	if err != nil {
-		return cid.Undef, err
-	}
-
 	mp.curTsLk.Lock()
 	publish, err := mp.addTs(m, mp.curTs, true, false)
 	if err != nil {
@@ -500,18 +520,19 @@ func (mp *MessagePool) Push(m *types.SignedMessage) (cid.Cid, error) {
 	}
 	mp.curTsLk.Unlock()
 
-	mp.lk.Lock()
-	if err := mp.addLocal(m, msgb); err != nil {
-		mp.lk.Unlock()
-		return cid.Undef, err
-	}
-	mp.lk.Unlock()
-
 	if publish {
+		msgb, err := m.Serialize()
+		if err != nil {
+			return cid.Undef, xerrors.Errorf("error serializing message: %w", err)
+		}
+
 		err = mp.api.PubSubPublish(build.MessagesTopic(mp.netName), msgb)
+		if err != nil {
+			return cid.Undef, xerrors.Errorf("error publishing message: %w", err)
+		}
 	}
 
-	return m.Cid(), err
+	return m.Cid(), nil
 }
 
 func (mp *MessagePool) checkMessage(m *types.SignedMessage) error {
@@ -650,7 +671,19 @@ func (mp *MessagePool) addTs(m *types.SignedMessage, curTs *types.TipSet, local,
 		return false, err
 	}
 
-	return publish, mp.addLocked(m, !local, untrusted)
+	err = mp.addLocked(m, !local, untrusted)
+	if err != nil {
+		return false, err
+	}
+
+	if local {
+		err = mp.addLocal(m)
+		if err != nil {
+			return false, xerrors.Errorf("error persisting local message: %w", err)
+		}
+	}
+
+	return publish, nil
 }
 
 func (mp *MessagePool) addLoaded(m *types.SignedMessage) error {
@@ -659,10 +692,11 @@ func (mp *MessagePool) addLoaded(m *types.SignedMessage) error {
 		return err
 	}
 
-	mp.curTsLk.Lock()
-	defer mp.curTsLk.Unlock()
-
 	curTs := mp.curTs
+
+	if curTs == nil {
+		return xerrors.Errorf("current tipset not loaded")
+	}
 
 	snonce, err := mp.getStateNonce(m.Message.From, curTs)
 	if err != nil {
@@ -672,9 +706,6 @@ func (mp *MessagePool) addLoaded(m *types.SignedMessage) error {
 	if snonce > m.Message.Nonce {
 		return xerrors.Errorf("minimum expected nonce is %d: %w", snonce, ErrNonceTooLow)
 	}
-
-	mp.lk.Lock()
-	defer mp.lk.Unlock()
 
 	_, err = mp.verifyMsgBeforeAdd(m, curTs, true)
 	if err != nil {
@@ -744,7 +775,7 @@ func (mp *MessagePool) addLocked(m *types.SignedMessage, strict, untrusted bool)
 		Message: m,
 	}, localUpdates)
 
-	journal.J.RecordEvent(mp.evtTypes[evtTypeMpoolAdd], func() interface{} {
+	mp.journal.RecordEvent(mp.evtTypes[evtTypeMpoolAdd], func() interface{} {
 		return MessagePoolEvt{
 			Action:   "add",
 			Messages: []MessagePoolEvtMessage{{Message: m.Message, CID: m.Cid()}},
@@ -819,11 +850,6 @@ func (mp *MessagePool) PushUntrusted(m *types.SignedMessage) (cid.Cid, error) {
 		<-mp.addSema
 	}()
 
-	msgb, err := m.Serialize()
-	if err != nil {
-		return cid.Undef, err
-	}
-
 	mp.curTsLk.Lock()
 	publish, err := mp.addTs(m, mp.curTs, false, true)
 	if err != nil {
@@ -832,18 +858,19 @@ func (mp *MessagePool) PushUntrusted(m *types.SignedMessage) (cid.Cid, error) {
 	}
 	mp.curTsLk.Unlock()
 
-	mp.lk.Lock()
-	if err := mp.addLocal(m, msgb); err != nil {
-		mp.lk.Unlock()
-		return cid.Undef, err
-	}
-	mp.lk.Unlock()
-
 	if publish {
+		msgb, err := m.Serialize()
+		if err != nil {
+			return cid.Undef, xerrors.Errorf("error serializing message: %w", err)
+		}
+
 		err = mp.api.PubSubPublish(build.MessagesTopic(mp.netName), msgb)
+		if err != nil {
+			return cid.Undef, xerrors.Errorf("error publishing message: %w", err)
+		}
 	}
 
-	return m.Cid(), err
+	return m.Cid(), nil
 }
 
 func (mp *MessagePool) Remove(from address.Address, nonce uint64, applied bool) {
@@ -865,7 +892,7 @@ func (mp *MessagePool) remove(from address.Address, nonce uint64, applied bool) 
 			Message: m,
 		}, localUpdates)
 
-		journal.J.RecordEvent(mp.evtTypes[evtTypeMpoolRemove], func() interface{} {
+		mp.journal.RecordEvent(mp.evtTypes[evtTypeMpoolRemove], func() interface{} {
 			return MessagePoolEvt{
 				Action:   "remove",
 				Messages: []MessagePoolEvtMessage{{Message: m.Message, CID: m.Cid()}}}
