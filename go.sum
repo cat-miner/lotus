@@ -1445,8 +1445,6 @@ github.com/whyrusleeping/go-smux-multiplex v3.0.16+incompatible/go.mod h1:34LEDb
 github.com/whyrusleeping/go-smux-multistream v2.0.2+incompatible/go.mod h1:dRWHHvc4HDQSHh9gbKEBbUZ+f2Q8iZTPG3UOGYODxSQ=
 github.com/whyrusleeping/go-smux-yamux v2.0.8+incompatible/go.mod h1:6qHUzBXUbB9MXmw3AUdB52L8sEb/hScCqOdW2kj/wuI=
 github.com/whyrusleeping/go-smux-yamux v2.0.9+incompatible/go.mod h1:6qHUzBXUbB9MXmw3AUdB52L8sEb/hScCqOdW2kj/wuI=
-github.com/whyrusleeping/ledger-filecoin-go v0.9.1-0.20201010031517-c3dcc1bddce4 h1:NwiwjQDB3CzQ5XH0rdMh1oQqzJH7O2PSLWxif/w3zsY=
-github.com/whyrusleeping/ledger-filecoin-go v0.9.1-0.20201010031517-c3dcc1bddce4/go.mod h1:K+EVq8d5QcQ2At5VECsA+SNZvWefyBXh8TnIsxo1OvQ=
 github.com/whyrusleeping/mafmt v1.2.8/go.mod h1:faQJFPbLSxzD9xpA02ttW/tS9vZykNvXwGvqIpk20FA=
 github.com/whyrusleeping/mdns v0.0.0-20180901202407-ef14215e6b30/go.mod h1:j4l84WPFclQPj320J9gp0XwNKBb3U0zt5CBqjPp22G4=
 github.com/whyrusleeping/mdns v0.0.0-20190826153040-b9b60ed33aa9/go.mod h1:j4l84WPFclQPj320J9gp0XwNKBb3U0zt5CBqjPp22G4=
