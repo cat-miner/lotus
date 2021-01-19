@@ -84,7 +84,7 @@ func main_exe() {
 }
 
 var sealBenchCmd = &cli.Command{
-	Name:  "checking,port.go:89:28: not enough",
+	Name:  "checking",
 	Usage: "filecash sector checker",
 	Flags: []cli.Flag{
 		&cli.StringFlag{
